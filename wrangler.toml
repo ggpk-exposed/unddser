@@ -1,0 +1,16 @@
+name = "unddser"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-12-22"
+
+services = [
+    { binding = "upstream", service = "ggpker" }
+]
+
+[dev]
+port = 8789
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[observability]
+logs.enabled = true
