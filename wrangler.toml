@@ -6,6 +6,9 @@ services = [
     { binding = "upstream", service = "ggpker" }
 ]
 
+[vars]
+BROWSER = "https://www.ggpk.exposed"
+
 [dev]
 port = 8789
 

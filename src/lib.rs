@@ -2,11 +2,20 @@ use image::{GenericImage, ImageFormat, ImageReader};
 use serde::Deserialize;
 use std::io::Cursor;
 use std::path::Path;
+use std::str::FromStr;
 use worker::*;
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     console_error_panic_hook::set_once();
+
+    if req.path().ends_with("/") {
+        let mut url = Url::from_str(&env.var("BROWSER")?.to_string())?;
+        if let Ok(mut path) = url.path_segments_mut() {
+            path.extend(req.url()?.path_segments().unwrap_or("".split('/')));
+        };
+        return Response::redirect(url);
+    }
 
     let params: Params = req.query()?;
 
@@ -76,12 +85,23 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             .and_then(|v| headers.set(header, v.as_str()).ok());
     }
 
+    for (name, value) in [
+        ("Access-Control-Allow-Origin", "*"),
+        ("Access-Control-Allow-Methods", "*"),
+        ("Access-Control-Max-Age", "86400"),
+        ("Access-Control-Allow-Headers", "*"),
+    ] {
+        headers.set(name, value)?
+    }
+
     let raw = response.bytes().await?;
-    let mut image = ImageReader::new(Cursor::new(raw))
-        .with_guessed_format()
-        .expect("Failed to guess format")
-        .decode()
-        .expect("Failed to decode image");
+    let mut image = match ImageReader::new(Cursor::new(raw)).with_guessed_format() {
+        Err(e) => return Response::error(format!("Failed to guess format: {}", e), 500),
+        Ok(reader) => match reader.decode() {
+            Err(e) => return Response::error(format!("Failed to decode image: {}", e), 500),
+            Ok(image) => image,
+        },
+    };
 
     let mut output = Cursor::new(Vec::new());
     if let Params {
@@ -93,14 +113,13 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     } = params
     {
         let cropped = image.sub_image(x, y, w, h);
-        cropped
-            .to_image()
-            .write_to(&mut output, out_format)
-            .expect("Failed to write cropped image");
+        if let Err(e) = cropped.to_image().write_to(&mut output, out_format) {
+            return Response::error(format!("Failed to write cropped image: {}", e), 500);
+        }
     } else {
-        image
-            .write_to(&mut output, out_format)
-            .expect("Failed to write image");
+        if let Err(e) = image.write_to(&mut output, out_format) {
+            return Response::error(format!("Failed to write image: {}", e), 500);
+        }
     }
 
     Ok(ResponseBuilder::new()
