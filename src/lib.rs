@@ -29,7 +29,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                     // https://www.rfc-editor.org/rfc/rfc9110#name-accept-language
                     // "some recipients ... cannot be relied upon" <- that's us
                     v = v.split_once(';').map_or(v, |(s, _)| s).trim();
-                    if let Some(f) = ImageFormat::from_mime_type(&v) {
+                    if let Some(f) = ImageFormat::from_mime_type(v) {
                         return Some(f);
                     }
                 }
@@ -41,19 +41,19 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let mut headers = Headers::new();
 
     let mut filename = Path::new(req.url()?.path()).to_path_buf();
-    out_format.extensions_str().iter().next().map(|ext| {
+    if let Some(ext) = out_format.extensions_str().iter().next() {
         filename.set_extension(ext);
-    });
-    filename
+    }
+    if let Some(mut f) = filename
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
-        .map(|mut f| {
-            f.retain(|c| c.is_ascii() && !c.is_ascii_control());
-            let _ = headers.set(
-                "content-disposition",
-                format!(r#"inline; filename="{}""#, f).as_str(),
-            );
-        });
+    {
+        f.retain(|c| c.is_ascii() && !c.is_ascii_control());
+        let _ = headers.set(
+            "content-disposition",
+            format!(r#"inline; filename="{}""#, f).as_str(),
+        );
+    }
     headers.set("content-type", out_format.to_mime_type())?;
 
     // both the incoming accept-encoding header and the actual encoding of the outgoing file are modified by cloudflare.
@@ -116,10 +116,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         if let Err(e) = cropped.to_image().write_to(&mut output, out_format) {
             return Response::error(format!("Failed to write cropped image: {}", e), 500);
         }
-    } else {
-        if let Err(e) = image.write_to(&mut output, out_format) {
-            return Response::error(format!("Failed to write image: {}", e), 500);
-        }
+    } else if let Err(e) = image.write_to(&mut output, out_format) {
+        return Response::error(format!("Failed to write image: {}", e), 500);
     }
 
     Ok(ResponseBuilder::new()
