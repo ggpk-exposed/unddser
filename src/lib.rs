@@ -5,6 +5,8 @@ use std::path::Path;
 use std::str::FromStr;
 use worker::*;
 
+static SEMAPHORE: async_lock::Semaphore = async_lock::Semaphore::new(8);
+
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     console_error_panic_hook::set_once();
@@ -17,15 +19,11 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return Response::redirect(url);
     }
 
-    let cache = Cache::default();
-    if let Some(img) = cache.get(&req, false).await? {
-        return Ok(img);
-    }
-
     let params: Params = req.query()?;
 
     let out_format = params
         .format
+        .as_ref()
         .and_then(ImageFormat::from_extension)
         .or_else(|| {
             if let Ok(Some(accept)) = req.headers().get("accept") {
@@ -73,63 +71,85 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         headers.set("content-encoding", encoding).ok();
     }
 
-    let mut image = {
-        let mut response = env.service("upstream")?.fetch_request(req.clone()?).await?;
-        if response.status_code() >= 400 {
-            return Response::error(
-                format!("{} error from upstream", response.status_code()),
-                500,
-            );
-        } else if response.status_code() == 304 {
-            return Ok(response);
-        }
-
-        for header in ["last-modified", "etag", "cache-control", "expires", "date"] {
-            response
-                .headers()
-                .get(header)?
-                .and_then(|v| headers.set(header, v.as_str()).ok());
-        }
-
-        for (name, value) in [
-            ("Access-Control-Allow-Origin", "*"),
-            ("Access-Control-Allow-Methods", "*"),
-            ("Access-Control-Max-Age", "86400"),
-            ("Access-Control-Allow-Headers", "*"),
-        ] {
-            headers.set(name, value)?
-        }
-
-        let raw = response.bytes().await?;
-
-        match ImageReader::new(Cursor::new(raw)).with_guessed_format() {
-            Err(e) => return Response::error(format!("Failed to guess format: {}", e), 500),
-            Ok(reader) => match reader.decode() {
-                Err(e) => return Response::error(format!("Failed to decode image: {}", e), 500),
-                Ok(image) => image,
-            },
-        }
-    };
-
-    let mut output = Cursor::new(Vec::new());
-    if let Params {
-        x: Some(x),
-        y: Some(y),
-        w: Some(w),
-        h: Some(h),
-        ..
-    } = params
+    let cache = Cache::default();
     {
-        let cropped = image.sub_image(x, y, w, h);
-        if let Err(e) = cropped.to_image().write_to(&mut output, out_format) {
-            return Response::error(format!("Failed to write cropped image: {}", e), 500);
-        }
-    } else {
-        if let Err(e) = image.write_to(&mut output, out_format) {
-            return Response::error(format!("Failed to write image: {}", e), 500);
+        let path = req.url()?;
+        let key = Key {
+            path: path.as_str(),
+            params: &params,
+        };
+        if let Some(mut img) = cache.get(key, false).await? {
+            let bytes = img.bytes().await?;
+            let res = ResponseBuilder::new().with_headers(headers).fixed(bytes);
+            return Ok(res);
         }
     }
-    drop(image);
+
+    let output = {
+        let lock = SEMAPHORE.try_acquire();
+        if lock.is_none() {
+            return Response::error("Too many concurrent requests", 429);
+        }
+        let mut image = {
+            let mut response = env.service("upstream")?.fetch_request(req.clone()?).await?;
+            if response.status_code() >= 400 {
+                return Response::error(
+                    format!("{} error from upstream", response.status_code()),
+                    500,
+                );
+            } else if response.status_code() == 304 {
+                return Ok(response);
+            }
+
+            for header in ["last-modified", "etag", "cache-control", "expires", "date"] {
+                response
+                    .headers()
+                    .get(header)?
+                    .and_then(|v| headers.set(header, v.as_str()).ok());
+            }
+
+            for (name, value) in [
+                ("Access-Control-Allow-Origin", "*"),
+                ("Access-Control-Allow-Methods", "*"),
+                ("Access-Control-Max-Age", "86400"),
+                ("Access-Control-Allow-Headers", "*"),
+            ] {
+                headers.set(name, value)?
+            }
+
+            let raw = response.bytes().await?;
+
+            match ImageReader::new(Cursor::new(raw)).with_guessed_format() {
+                Err(e) => return Response::error(format!("Failed to guess format: {}", e), 500),
+                Ok(reader) => match reader.decode() {
+                    Err(e) => {
+                        return Response::error(format!("Failed to decode image: {}", e), 500)
+                    }
+                    Ok(image) => image,
+                },
+            }
+        };
+
+        let mut output = Cursor::new(Vec::new());
+        if let Params {
+            x: Some(x),
+            y: Some(y),
+            w: Some(w),
+            h: Some(h),
+            ..
+        } = params
+        {
+            let cropped = image.sub_image(x, y, w, h);
+            if let Err(e) = cropped.to_image().write_to(&mut output, out_format) {
+                return Response::error(format!("Failed to write cropped image: {}", e), 500);
+            }
+        } else {
+            if let Err(e) = image.write_to(&mut output, out_format) {
+                return Response::error(format!("Failed to write image: {}", e), 500);
+            }
+        }
+        output
+    };
 
     let vec = output.into_inner();
     let mut res = ResponseBuilder::new().with_headers(headers).fixed(vec);
@@ -145,4 +165,26 @@ struct Params {
     y: Option<u32>,
     w: Option<u32>,
     h: Option<u32>,
+}
+
+struct Key<'a> {
+    params: &'a Params,
+    path: &'a str,
+}
+impl<'a> Into<CacheKey<'a>> for Key<'a> {
+    fn into(self) -> CacheKey<'a> {
+        let mut key = self.path.to_string();
+
+        if let Params {
+            x: Some(x),
+            y: Some(y),
+            w: Some(w),
+            h: Some(h),
+            ..
+        } = self.params
+        {
+            key.push_str(&format!("?x{}&y{}&w{}&h{}", x, y, w, h));
+        }
+        CacheKey::Url(key)
+    }
 }
