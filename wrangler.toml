@@ -17,3 +17,6 @@ command = "cargo install -q worker-build && worker-build --release"
 
 [observability]
 logs.enabled = true
+
+[limits]
+cpu_ms = 100

@@ -17,6 +17,11 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return Response::redirect(url);
     }
 
+    let cache = Cache::default();
+    if let Some(img) = cache.get(&req, false).await? {
+        return Ok(img);
+    }
+
     let params: Params = req.query()?;
 
     let out_format = params
@@ -68,39 +73,42 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         headers.set("content-encoding", encoding).ok();
     }
 
-    let mut response = env.service("upstream")?.fetch_request(req).await?;
-    if response.status_code() >= 400 {
-        return Response::error(
-            format!("{} error from upstream", response.status_code()),
-            500,
-        );
-    } else if response.status_code() == 304 {
-        return Ok(response);
-    }
+    let mut image = {
+        let mut response = env.service("upstream")?.fetch_request(req.clone()?).await?;
+        if response.status_code() >= 400 {
+            return Response::error(
+                format!("{} error from upstream", response.status_code()),
+                500,
+            );
+        } else if response.status_code() == 304 {
+            return Ok(response);
+        }
 
-    for header in ["last-modified", "etag", "cache-control", "expires", "date"] {
-        response
-            .headers()
-            .get(header)?
-            .and_then(|v| headers.set(header, v.as_str()).ok());
-    }
+        for header in ["last-modified", "etag", "cache-control", "expires", "date"] {
+            response
+                .headers()
+                .get(header)?
+                .and_then(|v| headers.set(header, v.as_str()).ok());
+        }
 
-    for (name, value) in [
-        ("Access-Control-Allow-Origin", "*"),
-        ("Access-Control-Allow-Methods", "*"),
-        ("Access-Control-Max-Age", "86400"),
-        ("Access-Control-Allow-Headers", "*"),
-    ] {
-        headers.set(name, value)?
-    }
+        for (name, value) in [
+            ("Access-Control-Allow-Origin", "*"),
+            ("Access-Control-Allow-Methods", "*"),
+            ("Access-Control-Max-Age", "86400"),
+            ("Access-Control-Allow-Headers", "*"),
+        ] {
+            headers.set(name, value)?
+        }
 
-    let raw = response.bytes().await?;
-    let mut image = match ImageReader::new(Cursor::new(raw)).with_guessed_format() {
-        Err(e) => return Response::error(format!("Failed to guess format: {}", e), 500),
-        Ok(reader) => match reader.decode() {
-            Err(e) => return Response::error(format!("Failed to decode image: {}", e), 500),
-            Ok(image) => image,
-        },
+        let raw = response.bytes().await?;
+
+        match ImageReader::new(Cursor::new(raw)).with_guessed_format() {
+            Err(e) => return Response::error(format!("Failed to guess format: {}", e), 500),
+            Ok(reader) => match reader.decode() {
+                Err(e) => return Response::error(format!("Failed to decode image: {}", e), 500),
+                Ok(image) => image,
+            },
+        }
     };
 
     let mut output = Cursor::new(Vec::new());
@@ -121,10 +129,13 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             return Response::error(format!("Failed to write image: {}", e), 500);
         }
     }
+    drop(image);
 
-    Ok(ResponseBuilder::new()
-        .with_headers(headers)
-        .fixed(output.into_inner()))
+    let vec = output.into_inner();
+    let mut res = ResponseBuilder::new().with_headers(headers).fixed(vec);
+    cache.put(&req, res.cloned()?).await?;
+
+    Ok(res)
 }
 
 #[derive(Deserialize)]
