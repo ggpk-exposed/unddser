@@ -5,7 +5,7 @@ use std::path::Path;
 use std::str::FromStr;
 use worker::*;
 
-static SEMAPHORE: async_lock::Semaphore = async_lock::Semaphore::new(8);
+static SEMAPHORE: async_lock::Semaphore = async_lock::Semaphore::new(4);
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
@@ -71,6 +71,11 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         headers.set("content-encoding", encoding).ok();
     }
 
+    let lock = SEMAPHORE.try_acquire();
+    if lock.is_none() {
+        return Response::error("Too many concurrent requests", 429);
+    }
+
     let cache = Cache::default();
     {
         let path = req.url()?;
@@ -86,10 +91,6 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
 
     let output = {
-        let lock = SEMAPHORE.try_acquire();
-        if lock.is_none() {
-            return Response::error("Too many concurrent requests", 429);
-        }
         let mut image = {
             let mut response = env.service("upstream")?.fetch_request(req.clone()?).await?;
             if response.status_code() >= 400 {
