@@ -2,11 +2,8 @@ name = "unddser"
 main = "build/worker/shim.mjs"
 compatibility_date = "2024-12-22"
 
-services = [
-    { binding = "upstream", service = "ggpker" }
-]
-
 [vars]
+UPSTREAM = "https://ggpk.exposed"
 BROWSER = "https://www.ggpk.exposed"
 
 [dev]

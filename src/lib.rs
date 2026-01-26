@@ -41,7 +41,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
         .unwrap_or(ImageFormat::Png);
 
-    let mut headers = Headers::new();
+    let headers = Headers::new();
 
     let mut filename = Path::new(req.url()?.path()).to_path_buf();
     out_format.extensions_str().iter().next().map(|ext| {
@@ -92,7 +92,12 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
     let output = {
         let mut image = {
-            let mut response = env.service("upstream")?.fetch_request(req.clone()?).await?;
+            let upstream_url = env.var("UPSTREAM")?.to_string();
+            let mut url = Url::parse(&upstream_url)?;
+            url.set_path(req.path().as_str());
+            url.set_query(req.url()?.query());
+
+            let mut response = Fetch::Url(url).send().await?;
             if response.status_code() >= 400 {
                 return Response::error(
                     format!("{} error from upstream", response.status_code()),
