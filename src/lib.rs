@@ -1,3 +1,4 @@
+use image::ImageFormat::Dds;
 use image::{GenericImage, ImageFormat, ImageReader};
 use serde::Deserialize;
 use std::io::Cursor;
@@ -125,14 +126,9 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
             let raw = response.bytes().await?;
 
-            match ImageReader::new(Cursor::new(raw)).with_guessed_format() {
-                Err(e) => return Response::error(format!("Failed to guess format: {}", e), 500),
-                Ok(reader) => match reader.decode() {
-                    Err(e) => {
-                        return Response::error(format!("Failed to decode image: {}", e), 500)
-                    }
-                    Ok(image) => image,
-                },
+            match ImageReader::with_format(Cursor::new(raw), Dds).decode() {
+                Err(e) => return Response::error(format!("Failed to decode image: {}", e), 500),
+                Ok(image) => image,
             }
         };
 
